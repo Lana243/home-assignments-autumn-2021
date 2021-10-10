@@ -54,18 +54,25 @@ class _CornerBuilderHelper:
         self.sizes = []
         self.max_id = 0
 
-        self.WINDOW_SIZE = (10, 10)
-        self.MAX_LEVEL = 1
-        self.MAX_CORNERS = 50000
-        self.MAX_CORNERS_PER_FRAME = 500
-        self.MIN_DIST = 10
         self.BLOCK_SIZE = 10
+        self.WINDOW_SIZE = (self.BLOCK_SIZE * 2, self.BLOCK_SIZE * 2)
+        self.MAX_LEVEL = 1
+        self.MAX_CORNERS = 5000
+        self.MAX_CORNERS_PER_FRAME = 500
+        self.MIN_DIST = self.BLOCK_SIZE * 2
+        self.FIRST_QUALITY = 0.01
+        self.QUALITY = 0.04
+
 
     # Creates mask that helps to avoid too close corners
-    def create_mask(self, h, w):
+    def create_mask(self, h, w, level):
         mask = np.full(shape=(h, w), fill_value=255, dtype=np.uint8)
         for (x, y), radius in zip(self.corners, self.sizes):
-            mask = cv2.circle(mask, (np.round(x).astype(int), np.round(y).astype(int)), 4 * radius, color=0)
+            x /= 2 ** level
+            y /= 2 ** level
+            radius /= 2 ** level
+            mask = cv2.circle(mask, (np.round(x).astype(int), np.round(y).astype(int)), np.round(2 * radius).astype(int),
+                              color=0, thickness=-1)
         return mask
 
     # Creates an optical flow to find corners from the previous frame on the next one
@@ -84,17 +91,21 @@ class _CornerBuilderHelper:
     # Find new corners on the current frame. Use mask to avoid corners too close to existing ones
     def add_new_corners(self, frame):
 
-        mask = self.create_mask(frame.shape[0], frame.shape[1])
         _, pyramid = cv2.buildOpticalFlowPyramid(frame, self.WINDOW_SIZE, self.MAX_LEVEL, None, False)
-        _, mask_pyramid = cv2.buildOpticalFlowPyramid(mask, self.WINDOW_SIZE, self.MAX_LEVEL, None, False)
 
         for level, level_frame in enumerate(pyramid):
             if len(self.corners) >= self.MAX_CORNERS:
                 return
+            mask = self.create_mask(level_frame.shape[0], level_frame.shape[1], level)
+
             num = min(self.MAX_CORNERS - len(self.corners), self.MAX_CORNERS_PER_FRAME)
+
+            quality_level = self.QUALITY
+            if len(self.corners) <= self.MAX_CORNERS_PER_FRAME:
+                quality_level = self.FIRST_QUALITY
             new_corners = cv2.goodFeaturesToTrack(image=level_frame, maxCorners=num,
-                                                  qualityLevel=0.01, minDistance=self.MIN_DIST,
-                                                  blockSize=self.BLOCK_SIZE, mask=mask_pyramid[level])
+                                                  qualityLevel=quality_level, minDistance=self.MIN_DIST,
+                                                  blockSize=self.BLOCK_SIZE, mask=mask)
             if new_corners is None:
                 continue
 
