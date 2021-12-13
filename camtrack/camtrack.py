@@ -22,7 +22,9 @@ from _camtrack import (
     build_correspondences,
     triangulate_correspondences,
     TriangulationParameters,
-    rodrigues_and_translation_to_view_mat3x4
+    rodrigues_and_translation_to_view_mat3x4,
+    eye3x4,
+    Correspondences
 )
 
 
@@ -41,12 +43,7 @@ class TrackedPoseInfo:
 class CameraTracker:
 
     def __init__(self, int_cam_params, corner_storage, known_view_1, known_view_2, num_frames):
-        self.num_defined_poses = 0
-        if known_view_1 is not None:
-            self.num_defined_poses += 1
-
-        if known_view_2 is not None:
-            self.num_defined_poses += 1
+        self.num_defined_poses = 2
 
         self.int_cam_params = int_cam_params
         self.corner_storage = corner_storage
@@ -54,11 +51,74 @@ class CameraTracker:
         self.point_cloud = {}
         self.tracked_poses = [None] * self.num_frames
 
-        self.tracked_poses[known_view_1[0]] = TrackedPoseInfo(pose_to_view_mat3x4(known_view_1[1]), np.inf)
-        self.tracked_poses[known_view_2[0]] = TrackedPoseInfo(pose_to_view_mat3x4(known_view_2[1]), np.inf)
+        if known_view_1 is None or known_view_2 is None:
+            known_view_frame_1, known_view_frame_2 = self._initialize_camtrack_()
+        else:
+            known_view_frame_1 = known_view_1[0]
+            known_view_frame_2 = known_view_2[0]
+            self.tracked_poses[known_view_1[0]] = TrackedPoseInfo(pose_to_view_mat3x4(known_view_1[1]), np.inf)
+            self.tracked_poses[known_view_2[0]] = TrackedPoseInfo(pose_to_view_mat3x4(known_view_2[1]), np.inf)
 
-        pts_cloud, ids, _ = self._triangulate(known_view_1[0], known_view_2[0], True)
+        pts_cloud, ids, _ = self._triangulate(known_view_frame_1, known_view_frame_2, True)
         self._update_points_cloud(pts_cloud, ids)
+
+    def _initialize_camtrack_(self,
+                              rec_level = 1,
+                              max_reproj_error=1.0,
+                              min_triang_angle_degree=5.0,
+                              min_triang_depth=10,
+                              max_rec_level=5):
+        print(f'Trying to find initial positions, attempt {rec_level}')
+        best_frame_1, best_frame_2 = None, None
+        m1 = eye3x4()
+        best_m2 = None
+        best_num_3d_points = 0
+
+        for frame_1 in range(0, len(self.corner_storage), int(self.num_frames / 10)):
+            frame_1_corners = self.corner_storage[frame_1]
+            for frame_2 in range(frame_1 + 1, len(self.corner_storage), int(self.num_frames / 10)):
+                frame_2_corners = self.corner_storage[frame_2]
+                corresp = build_correspondences(frame_1_corners, frame_2_corners)
+                essential_mat, inliers_mask = cv2.findEssentialMat(corresp.points_1, corresp.points_2,
+                                                                   self.int_cam_params, method=cv2.RANSAC,
+                                                                   threshold=max_reproj_error)
+                if essential_mat is None or inliers_mask.sum() == 0:
+                    continue
+
+                _, R, t, inliers_mask_recovered = cv2.recoverPose(essential_mat, corresp.points_1, corresp.points_2,
+                                                                  self.int_cam_params, mask=inliers_mask)
+
+                if inliers_mask_recovered.sum() == 0:
+                    continue
+                #print(corresp.ids.shape, inliers_mask_recovered.shape)
+
+                m2 = np.hstack((R, t))
+                points_3d, _, _ = triangulate_correspondences(
+                    Correspondences(
+                        corresp.ids[inliers_mask_recovered.flatten() == 1],
+                        corresp.points_1[inliers_mask_recovered.flatten() == 1],
+                        corresp.points_2[inliers_mask_recovered.flatten() == 1]),
+                    view_mat_1=m1, view_mat_2=m2,
+                    intrinsic_mat=self.int_cam_params,
+                    parameters=TriangulationParameters(max_reproj_error, min_triang_angle_degree, min_triang_depth)
+                )
+                if best_frame_1 is None or best_frame_2 is None or len(points_3d) > best_num_3d_points:
+                    best_frame_1 = frame_1
+                    best_frame_2 = frame_2
+                    best_m2 = m2.copy()
+                    best_num_3d_points = len(points_3d)
+
+        if best_frame_1 is None or best_frame_2 is None:
+            print("Fail to find positions good enough")
+            if rec_level > max_rec_level:
+                raise("Can't find initial camera positions")
+            return self._initialize_camtrack_(rec_level+1, max_reproj_error * 1.2,
+                                              min_triang_angle_degree=min_triang_angle_degree * 0.8)
+
+        self.tracked_poses[best_frame_1] = TrackedPoseInfo(m1, best_num_3d_points)
+        self.tracked_poses[best_frame_2] = TrackedPoseInfo(best_m2, best_num_3d_points)
+        return best_frame_1, best_frame_2
+
 
     def _update_points_cloud(self, pts_cloud, ids):
         inl = np.ones_like(ids)
@@ -189,8 +249,6 @@ def track_and_calc_colors(camera_parameters: CameraParameters,
                           known_view_1: Optional[Tuple[int, Pose]] = None,
                           known_view_2: Optional[Tuple[int, Pose]] = None) \
         -> Tuple[List[Pose], PointCloud]:
-    if known_view_1 is None or known_view_2 is None:
-        raise NotImplementedError()
 
     rgb_sequence = frameseq.read_rgb_f32(frame_sequence_path)
     intrinsic_mat = to_opencv_camera_mat3x3(
