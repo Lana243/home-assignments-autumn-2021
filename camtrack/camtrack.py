@@ -51,7 +51,6 @@ class CameraTracker:
         self.point_cloud = {}
         self.tracked_poses = [None] * self.num_frames
 
-
         if known_view_1 is None or known_view_2 is None:
             known_view_frame_1, known_view_frame_2 = self._initialize_camtrack_()
         else:
@@ -119,9 +118,6 @@ class CameraTracker:
         self.tracked_poses[best_frame_1] = TrackedPoseInfo(m1, best_num_3d_points)
         self.tracked_poses[best_frame_2] = TrackedPoseInfo(best_m2, best_num_3d_points)
         return best_frame_1, best_frame_2
-
-
-
 
 
     def _update_points_cloud(self, pts_cloud, ids):
